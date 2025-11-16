@@ -1,0 +1,15 @@
+# Dependency directories
+node_modules/
+/frontend/node_modules
+/backend/node_modules
+
+# Vite build output directory
+/frontend/dist
+
+# Environment variables
+.env
+frontend/.env
+backend/.env
+
+# Log files
+npm-debug.log

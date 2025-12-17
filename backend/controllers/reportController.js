@@ -1,51 +1,66 @@
-const mongoose = require('mongoose'); // <-- Make sure this line is here
+const mongoose = require('mongoose');
 const Expense = require('../models/Expense');
 const Budget = require('../models/Budget');
+const Category = require('../models/Category');
 
 exports.getMonthlyReport = async (req, res) => {
-  const { month } = req.query;
+  const { month } = req.query; // e.g. "2025-11"
+
+  res.setHeader('Cache-Control', 'no-store');
+
+  if (!month) {
+    return res.status(400).json({ msg: "Month parameter is required" });
+  }
+
   try {
-    const year = parseInt(month.slice(0, 4));
-    const monthIndex = parseInt(month.slice(5, 7)) - 1;
-    const startDate = new Date(Date.UTC(year, monthIndex, 1));
-    const endDate = new Date(Date.UTC(year, monthIndex + 1, 1));
+    const userId = req.user.id;
 
-    // --- Start of The Final Fix ---
-    // The query MUST use a proper ObjectId for the user, just like in the other controllers.
-    const budgets = await Budget.find({
-      user: new mongoose.Types.ObjectId(req.user.id),
-      month
-    }).populate('category');
-    // --- End of The Final Fix ---
+    const userMatch = {
+      $or: [
+        { user: new mongoose.Types.ObjectId(userId) },
+        { user: userId }
+      ]
+    };
 
-    const expenses = await Expense.aggregate([
-      {
-        $match: {
-          user: new mongoose.Types.ObjectId(req.user.id),
-          date: { $gte: startDate, $lt: endDate }
-        }
-      },
-      { $group: { _id: '$category', total: { $sum: '$amount' } } },
-      { $lookup: { from: 'categories', localField: '_id', foreignField: '_id', as: 'category' } },
-      { $unwind: '$category' }
+    // Fetch categories and budgets
+    const [categories, budgets, allExpenses] = await Promise.all([
+      Category.find({ user: userId }),
+      Budget.find({ ...userMatch, month }),
+      Expense.find(userMatch)
     ]);
 
-    const report = budgets.map(b => {
-      // This check prevents crashes if a category was deleted
-      if (!b.category) return null;
+    // Filter expenses using reliable ISO string prefix
+    const monthlyExpenses = allExpenses.filter(expense => {
+      if (!expense.date) return false;
+      const iso = expense.date.toISOString(); // "2025-11-15T00:00:00.000Z"
+      return iso.slice(0, 7) === month; // matches "2025-11"
+    });
 
-      const spent = expenses.find(e => e._id.toString() === b.category._id.toString())?.total || 0;
+    console.log(`REPORT: Matched ${monthlyExpenses.length} expenses for ${month}`);
+
+    const report = categories.map(cat => {
+      const budgetObj = budgets.find(b => b.category?.toString() === cat._id.toString());
+      const budget = budgetObj ? budgetObj.limit : 0;
+
+      const spent = monthlyExpenses
+        .filter(e => e.category?.toString() === cat._id.toString())
+        .reduce((sum, e) => sum + e.amount, 0);
+
+      if (budget === 0 && spent === 0) return null;
+
       return {
-        category: b.category,
-        budget: b.limit,
+        category: cat,
+        budget,
         spent,
-        remaining: b.limit - spent
+        remaining: budget - spent
       };
-    }).filter(Boolean); // .filter(Boolean) cleanly removes any null items from the array
+    }).filter(Boolean);
+
+    console.log(`REPORT: Returning ${report.length} items for ${month}`);
 
     res.json(report);
   } catch (err) {
-    console.error("Error in getMonthlyReport:", err.message);
+    console.error("Report Error:", err.message);
     res.status(500).json({ msg: 'Server error' });
   }
 };
